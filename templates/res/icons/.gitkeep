@@ -1,0 +1,3 @@
+# 犀鸟 (Hornbill) — 图标目录
+# 把所有 .png 图标放这里，在 .rhproj 的 resources 数组中逐个声明
+# 示例声明: { "id": "...", "uri": "res/icons/plugin.png" }

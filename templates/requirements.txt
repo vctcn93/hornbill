@@ -1,0 +1,28 @@
+# Rhino 8 Python Plugin - 第三方依赖
+# 用法：取消你需要的注释，锁定版本以防破坏性更新
+# pip 安装到 Rhino site-envs 目录（install.bat 自动处理）
+
+# 科学计算（纯 Python wheel，无需 C++ 编译器）
+numpy>=1.26,<2.0
+scipy>=1.11,<1.12
+
+# 图像处理
+Pillow>=10.0,<11.0
+
+# 异步 HTTP（瓦片下载等）
+aiohttp>=3.9,<4.0
+
+# 绘图
+matplotlib>=3.8,<4.0
+
+# 地理空间
+# pandas>=2.0,<3.0
+# geopandas>=0.14,<1.0
+# pyproj>=3.6,<4.0
+# coordTransform>=1.0,<2.0
+
+# 时区（需纯 Python wheel 版本，避开 C++ 编译）
+# timezonefinder>=6.0,<6.1
+
+# 解析
+# parse>=1.20,<2.0
