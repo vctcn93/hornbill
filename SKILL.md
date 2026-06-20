@@ -63,7 +63,8 @@ my-plugin/
 5. **安装** — `yak.exe uninstall` → `yak.exe install build/rh8/*.yak`
 
 关键细节：
-- `install.bat` 编译前 `xcopy configs\*.ini src\core\`
+- `install.bat` **编译前** `xcopy configs\*.ini src\core\` — 让 .ini 跟着源码一起打包进 .rhp
+- `install.bat` **编译后** `xcopy res\*` 到 `~\.rhinocode\libs\<hash>\res\` — 编译才创建新 hash 目录，必须在 build 之后复制；遍历所有 libs 目录，找到含 `core\<plugin>.py` 的才 copy
 - pip 用 `--target` 安装到 Rhino 的 site-envs 目录
 - `requirements.txt` 锁定版本，注释掉需要 C++ 编译器的版本
 
@@ -73,22 +74,53 @@ my-plugin/
 
 **模式：`configs/` 维护 → `install.bat` 复制 → `src/core/` 运行时读取**
 
-```ini
-# configs/urls.ini
-[section]
-key = value
-# 注释掉的备选方案
-# key = alternative
+### 编码陷阱
+
+**中文 Windows 上 `ConfigParser.read()` 默认用 gbk 编码，会静默损坏 UTF-8 .ini 文件。必须显式传 `encoding='utf-8'`：**
+
+```python
+ini = ConfigParser()
+ini.read(path, encoding='utf-8')  # 不加 encoding 中文 Windows 必崩
 ```
 
-**Python 端读取：**
-```python
-from configparser import ConfigParser
-from pathlib import Path
+### 多服务商 INI 模式
 
-_ini = ConfigParser()
-_ini.read(Path(__file__).resolve().parent / 'urls.ini')
-value = _ini['section']['key']
+URL 模板和 API Key **分开存放**，Key 文件 gitignore：
+
+```ini
+# configs/urls.ini — 不含密钥，可提交 git
+[terrain.maptiler]
+name = MapTiler Terrain-RGB
+url = https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key={key}
+format = mapbox
+
+[satellite.xingtu]
+name = 星图地球影像
+url = https://tiles1.geovisearth.com/base/v1/img/{z}/{x}/{y}?format=webp&token={key}
+
+# configs/tokens.ini — 含密钥，.gitignore 全域屏蔽
+[maptiler]
+key = sk-xxxxxxxx
+[xingtu]
+key = xxxxxxxxxxxxx
+```
+
+**规则：** `urls.ini` 中 `[category.provider_id]` 对应 `tokens.ini` 中 `[provider_id]`。同一 provider 的 terrain 和 satellite 共用 token。URL 中 `{key}` 占位符用 `.format(key=token)` 填充，无 key 的 URL 不需要 `{key}`（Python `.format()` 忽略多余 kwargs）。
+
+### 运行时读取
+
+```python
+ini = ConfigParser()
+ini.read(Path(__file__).resolve().parent / 'urls.ini', encoding='utf-8')
+# 扫描所有 [terrain.*] / [satellite.*] section
+for section in ini.sections():
+    if section.startswith('terrain.'):
+        pid = section.split('.', 1)[1]
+        name = ini[section]['name']
+
+tokens = ConfigParser()
+tokens.read(Path(__file__).resolve().parent / 'tokens.ini', encoding='utf-8')
+key = tokens[pid].get('key', fallback='') if pid in tokens else ''
 ```
 
 **关键：** 不要在模块 `import` 时读取 `.ini`（文件不存在会静默崩）。要么延迟到首次调用，要么包 `try/except` 加诊断日志。
@@ -117,7 +149,7 @@ def _(key):
     lang = _detect_language()
     if lang not in _CACHE:
         ini = ConfigParser()
-        ini.read(Path(__file__).resolve().parent / f'lang_{lang}.ini')
+        ini.read(Path(__file__).resolve().parent / f'lang_{lang}.ini', encoding='utf-8')
         _CACHE[lang] = ini['ui'] if ini.has_section('ui') else {}
     return _CACHE[lang].get(key, key)
 ```
@@ -191,6 +223,47 @@ class MyPanel(Panel):
 
 `add_controls` 把 `[[col1, col2, col3], ...]` 二维数组转成 `DynamicLayout`。
 
+### Rhino 8 Eto.Forms 特有陷阱
+
+**`Label(Text=...)` 构造函数在 Rhino 8 Python.NET 下崩溃：**
+
+❌ `lb = Label(Text=_('hello'))` — `No overload for method 'Label..ctor{}' takes '0' arguments()`
+
+✅ 必须两行：
+```python
+lb = Label()
+lb.Text = _('hello')
+```
+
+**`RadioButtonList.DataStore` 只接受扁平字符串列表：**
+
+❌ `DataStore = [('terrain', _('terrain')), ('satellite', _('satellite'))]` — `Specified cast is not valid`
+
+✅ `DataStore = [_('terrain_category'), _('satellite_category')]`
+
+**`DynamicLayout` 垂直分隔用 `[None]` 单独行：**
+
+```python
+# [None] = 垂直空隙行，不占水平列
+rows = [
+    [Label(), TextBox()],
+    [None],                    # ← 单独一行分隔两个控制组
+    [CheckBox(), Button()],
+]
+```
+
+❌ 不要把 `None` 塞进 `[Label(), None, Button()]` 的列里 — 那是列占位符，语义不同。
+
+**嵌套 `Panel` 隔离控制组：**
+
+```python
+pn_a = Panel(); add_controls(pn_a, [[...], [...]])
+pn_b = Panel(); add_controls(pn_b, [[...], [...]])
+outer_panel.add_controls([pn_a, [None], pn_b])
+```
+
+嵌套 Panel 防止 Eto 布局引擎跨组干扰。
+
 ### DiaCounterBar（后台任务进度条）
 
 ```python
@@ -220,7 +293,59 @@ def on_confirm(self, sender, e):
 
 ---
 
-## 6. Python.NET 坑清单
+## 6. Python.NET + Rhino 特有坑清单
+
+### `@singleton` 装饰器吃掉类属性
+
+自定义 `@singleton` 把类替换成 `get_instance` 函数，**类的所有属性都丢了**——包括 `@staticmethod`、`@classmethod`、类常量。
+
+```python
+def singleton(name):
+    def decorator(cls):
+        instances = {}
+        def get_instance(*args, **kwargs):
+            if name not in instances:
+                instances[name] = cls(*args, **kwargs)
+            return instances[name]
+        # ⚠️ 必须把类属性复制到 wrapper，否则丢失！
+        for attr_name in dir(cls):
+            if not attr_name.startswith('_'):
+                setattr(get_instance, attr_name, getattr(cls, attr_name))
+        return get_instance
+    return decorator
+
+@singleton('my.plugin')
+class MyClass:
+    CONST = 42                        # ← 不复制就丢
+
+    @staticmethod
+    def list_things():                # ← 不复制就丢
+        return [1, 2, 3]
+```
+
+❌ 不加属性复制 → `MyClass.list_things()` → `AttributeError: 'function' object has no attribute 'list_things'`
+
+✅ 装饰器里遍历 `dir(cls)` 把非私有属性拷贝到 wrapper 函数
+
+### 资源路径：从 `__file__` 向上走到包根
+
+代码在 staging（`~/.rhinocode/libs/<hash>/core/`）和 installed pkg（`shared/`）之间切换时，`__file__` 路径不同。通用解析模式：
+
+```python
+def _find_resource_dir(subpath):
+    """从 __file__ 向上走，找到 shared/ (pkg) 或 subpath (staging)"""
+    p = Path(__file__).resolve().parent
+    for _ in range(10):
+        for candidate in (p / 'shared', p / subpath):
+            if candidate.is_dir():
+                return candidate
+        p = p.parent
+    raise FileNotFoundError(f'{subpath} not found')
+```
+
+配合 `install.bat` 编译后把 `res/` 同步到 staging（见 §2），staging 环境也能找到。
+
+❌ 永远不要硬编码 `Path.home() / "Desktop" / "project"` — 项目目录随用户变化
 
 ### `Dialog<T>.Close(T)` 泛型绑定不可靠
 

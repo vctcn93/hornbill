@@ -33,6 +33,7 @@ my-plugin/
 ├── plugin.rhproj            # Rhino 项目文件
 ├── configs/                 # 配置入口（用户只改这里）
 │   ├── urls.ini
+│   ├── tokens.ini           # API Key（.gitignore）
 │   ├── lang_en.ini
 │   └── lang_cn.ini
 ├── cmd/                     # 命令入口
@@ -47,9 +48,10 @@ my-plugin/
 ## 核心特性
 
 - **多语言** — `lang.py` + `lang_*.ini`，自动检测 Rhino 语言
-- **Config 系统** — `configs/` 维护 → `install.bat` 同步 → `src/core/` 读取
+- **Config 系统** — `configs/` 维护 → `install.bat` 同步 → `src/core/` 读取，Token 隔离
+- **多服务商** — URL 和 API Key 分离，dropdown + add 模式
 - **Ponytail 强制** — 内置 Ponytail full 级精简规则
-- **Python.NET 坑** — 6 个常见陷阱及修复方案
+- **Python.NET 陷阱** — 10+ 个 Rhino 环境下 Python.NET 坑及修复
 - **Brainstorming Gate** — 写代码前强制需求确认
 
 ## 前置条件
