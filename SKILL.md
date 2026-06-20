@@ -21,11 +21,12 @@
 
 ```
 my-plugin/
-├── install.bat              # 一键安装脚本
+├── install.bat              # 一键安装脚本（必须 CRLF 换行！）
 ├── requirements.txt         # 第三方依赖（锁定版本）
 ├── plugin.rhproj            # Rhino 项目文件
-├── configs/                 # 配置入口（用户只改这里）
-│   ├── urls.ini
+├── config/                  # ⭐ 配置入口（项目根目录，和 res/ 同级）
+│   ├── urls.ini             # 服务商 URL（不含密钥，可提交 git）
+│   ├── tokens.ini           # API 密钥（.gitignore 屏蔽）
 │   ├── lang_en.ini
 │   └── lang_cn.ini
 ├── cmd/                     # 命令入口（每个 .py 一个 Rhino 命令）
@@ -45,10 +46,11 @@ my-plugin/
 
 ### .rhproj 关键规则
 
-- **library** 条目（`src/core/`、`src/forms/`）下的**所有文件**自动嵌入 `.rhp`
-- **resource** 条目（`res/` 下的单个文件）打进 `shared/`，运行时 `Path` 解析能找到
-- **非 library、非 resource 的目录**（如 `configs/`）**不会打包**——需要在 `install.bat` 编译前复制到 library 目录
-- `cmd/` 里的每个 `.py` 在 `.rhproj` 的 `codes` 数组中声明，`title` 就是 Rhino 命令名
+- **library** 条目（`src/core/`、`src/forms/`）下的**所有文件**（含子目录）自动嵌入 `.rhp`
+- **resource** 条目逐个声明非 Python 文件，部署到 `<pkg>/shared/` 目录（**不是** `<pkg>/shared/<子目录>/`）
+- **非 library、非 resource 的目录**（如 `config/`）**不会自动打包**——需要同时在 `.rhproj` 里注册为 resource + 在 `install.bat` 编译后同步到 staging
+- `cmd/` 里的每个 `.py` 在 `.rhproj` 的 `codes` 数组中逐条声明，`title` 就是 Rhino 命令名
+- ⚠️ `install.bat` 必须 CRLF 换行，CMD 不认 LF
 
 ---
 
@@ -63,8 +65,8 @@ my-plugin/
 5. **安装** — `yak.exe uninstall` → `yak.exe install build/rh8/*.yak`
 
 关键细节：
-- `install.bat` **编译前** `xcopy configs\*.ini src\core\` — 让 .ini 跟着源码一起打包进 .rhp
-- `install.bat` **编译后** `xcopy res\*` 到 `~\.rhinocode\libs\<hash>\res\` — 编译才创建新 hash 目录，必须在 build 之后复制；遍历所有 libs 目录，找到含 `core\<plugin>.py` 的才 copy
+- `install.bat` **编译后**同步 `config/*.ini` 和 `res/*` 到 staging：遍历所有 `~\.rhinocode\libs\<hash>\` 目录，找到含 `core\<plugin>.py` 的才 copy。编译才创建新 hash 目录，必须在 build 之后复制
+- **CRLF 换行**：`.bat` 文件如果是 LF，CMD 会吃掉每行首字符（`echo` → `cho`），整批脚本崩溃
 - pip 用 `--target` 安装到 Rhino 的 site-envs 目录
 - `requirements.txt` 锁定版本，注释掉需要 C++ 编译器的版本
 
@@ -72,69 +74,158 @@ my-plugin/
 
 ## 3. Config 系统
 
-**模式：`configs/` 维护 → `install.bat` 复制 → `src/core/` 运行时读取**
+### 部署链路（三条路径全覆盖）
 
-### 编码陷阱
-
-**中文 Windows 上 `ConfigParser.read()` 默认用 gbk 编码，会静默损坏 UTF-8 .ini 文件。必须显式传 `encoding='utf-8'`：**
-
-```python
-ini = ConfigParser()
-ini.read(path, encoding='utf-8')  # 不加 encoding 中文 Windows 必崩
+```
+config/  ← 项目根目录，用户手改
+   │
+   ├─→ .rhproj resources 注册 ──→ .yak 打包 ──→ <pkg>/shared/*.ini
+   ├─→ install.bat 编译后同步 ──→ ~/.rhinocode/libs/<hash>/config/*.ini
+   └─→ 项目根目录直接存在 ──→ dev 模式直读
 ```
 
-### 多服务商 INI 模式
+### .rhproj resource 注册
 
-URL 模板和 API Key **分开存放**，Key 文件 gitignore：
+**每个 .ini 作为 resource 逐条声明**（和 `res/gradients/*.png` 一样）：
+
+```json
+{
+  "resources": [
+    {"id": "uuid-1", "uri": "config/urls.ini"},
+    {"id": "uuid-2", "uri": "config/tokens.ini"},
+    {"id": "uuid-3", "uri": "config/lang_en.ini"},
+    {"id": "uuid-4", "uri": "config/lang_cn.ini"}
+  ]
+}
+```
+
+⚠️ **resource 部署到 `<pkg>/shared/urls.ini`，不是 `<pkg>/shared/config/urls.ini`。** URI 路径中的目录结构被展平到 `shared/` 下。
+
+### install.bat 同步
+
+编译后把 `config/*.ini` 复制到 staging（和梯度 PNG 同一个 `if` 块，同一次遍历）：
+
+```bat
+REM 编译后：遍历所有 libs 目录，找到 otter 的才同步
+for /d %%d in ("%USERPROFILE%\.rhinocode\libs\*") do (
+    if exist "%%d\core\gradient.py" (
+        if not exist "%%d\config" mkdir "%%d\config"
+        xcopy /Y "config\*.ini" "%%d\config\" >nul 2>&1
+    )
+)
+```
+
+⚠️ **`install.bat` 必须 CRLF 换行。** 如果文件是 LF，CMD 会把 `REM` 读成 `EM`、`echo` 读成 `cho`，整批脚本崩溃。
+
+### INI 极简格式
+
+**`urls.ini`** — 一个 section 一类服务，key 就是显示名，value 是 URL（terrain 带 `| format` 后缀）：
 
 ```ini
-# configs/urls.ini — 不含密钥，可提交 git
-[terrain.maptiler]
-name = MapTiler Terrain-RGB
-url = https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key={key}
-format = mapbox
+[terrain]
+MapTiler = https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key={key} | mapbox
+AWS = https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png | terrarium
 
-[satellite.xingtu]
-name = 星图地球影像
-url = https://tiles1.geovisearth.com/base/v1/img/{z}/{x}/{y}?format=webp&token={key}
-
-# configs/tokens.ini — 含密钥，.gitignore 全域屏蔽
-[maptiler]
-key = sk-xxxxxxxx
-[xingtu]
-key = xxxxxxxxxxxxx
+[satellite]
+星图 = https://tiles1.geovisearth.com/base/v1/img/{z}/{x}/{y}?format=webp&token={key}
+ESRI = https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
 ```
 
-**规则：** `urls.ini` 中 `[category.provider_id]` 对应 `tokens.ini` 中 `[provider_id]`。同一 provider 的 terrain 和 satellite 共用 token。URL 中 `{key}` 占位符用 `.format(key=token)` 填充，无 key 的 URL 不需要 `{key}`（Python `.format()` 忽略多余 kwargs）。
+**`tokens.ini`** — 纯平铺 `key = value`，无 section：
 
-### 运行时读取
+```ini
+maptiler = sk-xxxxxxxx
+xingtu = xxxxxxxxxxxxx
+amap = xxxxxxxxxxxxx
+```
+
+### 运行时读取：爬楼法
 
 ```python
-ini = ConfigParser()
-ini.read(Path(__file__).resolve().parent / 'urls.ini', encoding='utf-8')
-# 扫描所有 [terrain.*] / [satellite.*] section
-for section in ini.sections():
-    if section.startswith('terrain.'):
-        pid = section.split('.', 1)[1]
-        name = ini[section]['name']
+from configparser import ConfigParser
+from pathlib import Path
 
-tokens = ConfigParser()
-tokens.read(Path(__file__).resolve().parent / 'tokens.ini', encoding='utf-8')
-key = tokens[pid].get('key', fallback='') if pid in tokens else ''
+def _find_config():
+    """从 __file__ 向上走，同时检查 config/ 和 shared/ 目录。"""
+    here = Path(__file__).resolve().parent  # core/
+    for _ in range(6):
+        for d in (here / 'config', here / 'shared'):
+            if (d / 'urls.ini').exists():
+                return d
+        here = here.parent
+    return Path(__file__).parent / 'config'  # fallback
+
+def _read_urls_ini():
+    ini = ConfigParser()
+    ini.optionxform = str  # ⚠️ 保留 key 大小写（中文 Windows 必须）
+    ini.read(_find_config() / 'urls.ini', encoding='utf-8')
+    return ini
+
+def _read_tokens():
+    """tokens.ini 是平铺格式，不用 ConfigParser"""
+    tokens = {}
+    path = _find_config() / 'tokens.ini'
+    if path.exists():
+        for line in path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                k, v = line.split('=', 1)
+                tokens[k.strip()] = v.strip()
+    return tokens
 ```
 
-**关键：** 不要在模块 `import` 时读取 `.ini`（文件不存在会静默崩）。要么延迟到首次调用，要么包 `try/except` 加诊断日志。
+**为什么检查 `shared/`：** `.yak` 包里 resource 部署到 `<pkg>/shared/urls.ini`（URI `config/urls.ini` 被展平到 `shared/` 下）。dev 和 staging 下文件在 `config/` 子目录。
+
+**编码陷阱：** `ConfigParser.read()` 在中文 Windows 默认用 gbk，必须 `encoding='utf-8'`。`optionxform = str` 保留 key 大小写（默认的 `str.lower` 会吃掉中文）。
+
+### 多服务商读取
+
+```python
+def list_providers(category):
+    """返回 [name, ...]"""
+    ini = _read_urls_ini()
+    return list(ini[category].keys()) if category in ini else []
+
+def get_config(category, name):
+    ini = _read_urls_ini()
+    tokens = _read_tokens()
+    raw = ini[category][name]
+    if ' | ' in raw:
+        url, fmt = raw.rsplit(' | ', 1)
+    else:
+        url, fmt = raw, None
+    # token 映射：中文名 → pinyin
+    _TK = {'星图': 'xingtu', '天地图': 'tianditu'}
+    token_key = _TK.get(name, name.lower())
+    key = tokens.get(token_key, '')
+    return url, key, fmt
+```
+
+**规则：**
+- `optionxform = str` — 否则 `MapTiler` → `maptiler`，查找失败
+- 中文名 → token key 凭一个 dict 映射（`_TOKEN_KEYS`）
+- 延迟读取 `.ini`（首次调用时读，不在 import 时读）—— 文件不存在时不会静默崩
+- `tokens.ini` 不用 ConfigParser（平铺格式无 section）
 
 ---
 
 ## 4. 多语言
 
-**`lang.py` 骨架（25 行）：**
+**`lang.py` 骨架：**
 ```python
 from configparser import ConfigParser
 from pathlib import Path
 
 _CACHE = {}
+
+def _find_config():
+    here = Path(__file__).resolve().parent
+    for _ in range(6):
+        for d in (here / 'config', here / 'shared'):
+            if (d / 'lang_en.ini').exists():
+                return d
+        here = here.parent
+    return Path(__file__).parent / 'config'
 
 def _detect_language():
     try:
@@ -149,7 +240,7 @@ def _(key):
     lang = _detect_language()
     if lang not in _CACHE:
         ini = ConfigParser()
-        ini.read(Path(__file__).resolve().parent / f'lang_{lang}.ini', encoding='utf-8')
+        ini.read(_find_config() / f'lang_{lang}.ini', encoding='utf-8')
         _CACHE[lang] = ini['ui'] if ini.has_section('ui') else {}
     return _CACHE[lang].get(key, key)
 ```
@@ -329,21 +420,27 @@ class MyClass:
 
 ### 资源路径：从 `__file__` 向上走到包根
 
-代码在 staging（`~/.rhinocode/libs/<hash>/core/`）和 installed pkg（`shared/`）之间切换时，`__file__` 路径不同。通用解析模式：
+代码在 staging（`~/.rhinocode/libs/<hash>/core/`）和 installed pkg（`shared/`）之间切换时，`__file__` 路径不同。通用解析模式（**同时检查 `subpath/` 和 `shared/`**）：
 
 ```python
-def _find_resource_dir(subpath):
-    """从 __file__ 向上走，找到 shared/ (pkg) 或 subpath (staging)"""
+def _find_resource(subpath, sentinel):
+    """从 __file__ 向上走，找到 subpath/ 或 shared/ 中含 sentinel 的目录。
+    
+    subpath: dev/staging 下的目录名，如 'config' 或 'res/gradients'
+    sentinel: 标志文件名，如 'urls.ini' 或 'binary.png'
+    """
     p = Path(__file__).resolve().parent
     for _ in range(10):
-        for candidate in (p / 'shared', p / subpath):
-            if candidate.is_dir():
-                return candidate
+        for d in (p / subpath, p / 'shared'):
+            if (d / sentinel).exists():
+                return d
         p = p.parent
     raise FileNotFoundError(f'{subpath} not found')
 ```
 
-配合 `install.bat` 编译后把 `res/` 同步到 staging（见 §2），staging 环境也能找到。
+⚠️ **resource 在 .yak 里部署到 `<pkg>/shared/<filename>`**，不是 `<pkg>/shared/<subpath>/<filename>`。所以检查的是 `p / 'shared' / 'urls.ini'`，不是 `p / 'shared' / 'config' / 'urls.ini'`。
+
+配合 `install.bat` 编译后把 `config/` 同步到 staging（见 §2），staging 环境也能找到。
 
 ❌ 永远不要硬编码 `Path.home() / "Desktop" / "project"` — 项目目录随用户变化
 
@@ -478,7 +575,7 @@ t.start()
 
 ## 11. 开发流程
 
-1. **改配置** — 编辑 `configs/` 下的 `.ini`
+1. **改配置** — 编辑 `config/` 下的 `.ini`
 2. **改代码** — 编辑 `src/` 下的 `.py`
 3. **跑 install.bat** — 自动同步 configs、编译、安装
 4. **进 Rhino 测试** — 输入命令（如 `_o_hello`）
@@ -494,7 +591,7 @@ t.start()
 | `templates/install.bat` | 一键安装脚本，改 `PLUGIN_NAME` 即可 |
 | `templates/plugin.rhproj` | .rhproj 骨架，替换 identity/codes/libraries/resources |
 | `templates/requirements.txt` | 依赖模板，按需取消注释 |
-| `templates/configs/urls.ini` | Config 入口，注释示范多方案 |
+| `templates/config/urls.ini` | Config 入口，极简 `name = url [| format]` 格式 |
 | `templates/configs/lang_en.ini` | 英文字符串 key=value |
 | `templates/configs/lang_cn.ini` | 中文字符串 key=value |
 | `templates/cmd/o_hello.py` | 最小可跑 Rhino 命令示例 |
